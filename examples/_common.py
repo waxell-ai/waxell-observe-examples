@@ -409,6 +409,76 @@ class MockAsyncOpenAI:
 
 
 # ---------------------------------------------------------------------------
+# Mock sync OpenAI client (for sync context manager demos)
+# ---------------------------------------------------------------------------
+
+
+class _MockSyncCompletions:
+    """Mock for client.chat.completions with synchronous create()."""
+
+    def create(self, **kwargs: Any) -> MockChatCompletion:
+        messages = kwargs.get("messages", [])
+        model = kwargs.get("model", "gpt-4o-mini")
+        tools_param = kwargs.get("tools")
+
+        if tools_param:
+            has_tool_result = any(m.get("role") == "tool" for m in messages)
+            if not has_tool_result:
+                last_user = ""
+                for msg in reversed(messages):
+                    if msg.get("role") == "user":
+                        last_user = str(msg.get("content", "")).lower()
+                        break
+
+                tool_name = "web_search"
+                tool_args = '{"query": "general search"}'
+                for keyword, (tname, targs) in _TOOL_RESPONSE_PATTERNS.items():
+                    if keyword in last_user:
+                        tool_name, tool_args = tname, targs
+                        break
+
+                call_id = f"call_mock_{random.randint(100, 999)}"
+                tc = _MockToolCall(
+                    id=call_id,
+                    function=_MockFunctionCall(name=tool_name, arguments=tool_args),
+                )
+                return MockChatCompletion(
+                    content=None,
+                    model=model,
+                    prompt_tokens=180,
+                    completion_tokens=25,
+                    tool_calls=[tc],
+                )
+
+        content = _contextual_response(messages)
+        return MockChatCompletion(content=content, model=model)
+
+
+class _MockSyncChat:
+    """Mock for client.chat (sync)."""
+
+    def __init__(self) -> None:
+        self.completions = _MockSyncCompletions()
+
+
+class MockSyncOpenAI:
+    """A mock synchronous OpenAI client that returns contextual responses.
+
+    Usage::
+
+        client = MockSyncOpenAI()
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "classify this ticket"}],
+        )
+        print(response.choices[0].message.content)
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.chat = _MockSyncChat()
+
+
+# ---------------------------------------------------------------------------
 # Mock failing clients (for retry / fallback demos)
 # ---------------------------------------------------------------------------
 
@@ -799,6 +869,27 @@ def get_openai_client(dry_run: bool = False) -> Any:
 
     print("[Common] Using real OpenAI client")
     return AsyncOpenAI()
+
+
+def get_sync_openai_client(dry_run: bool = False) -> Any:
+    """Return a mock or real synchronous OpenAI client.
+
+    Args:
+        dry_run: Force mock client regardless of API key.
+
+    Returns mock client if *dry_run* is True or ``OPENAI_API_KEY`` is not set.
+    Otherwise returns ``OpenAI()`` (sync client).
+    """
+    if dry_run or not os.environ.get("OPENAI_API_KEY"):
+        mode = "dry-run" if dry_run else "no OPENAI_API_KEY"
+        print(f"[Common] Using mock sync OpenAI client ({mode})")
+        return MockSyncOpenAI()
+
+    # Lazy import -- openai may not be installed in all envs
+    from openai import OpenAI
+
+    print("[Common] Using real sync OpenAI client")
+    return OpenAI()
 
 
 def get_anthropic_client(dry_run: bool = False) -> Any:
