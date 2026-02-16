@@ -1,0 +1,4 @@
+waxell-observe[otel] @ git+https://github.com/waxell-ai/waxell-observe.git
+langchain-core>=0.1
+langchain-openai>=0.0.5
+python-dotenv>=1.0

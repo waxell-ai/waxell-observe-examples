@@ -1,0 +1,8 @@
+waxell-observe[all] @ git+https://github.com/waxell-ai/waxell-observe.git
+openai>=1.0
+anthropic>=0.18.0
+groq>=0.4
+litellm>=1.0
+langchain-core>=0.1
+langchain-openai>=0.0.5
+python-dotenv>=1.0

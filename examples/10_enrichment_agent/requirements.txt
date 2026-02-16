@@ -1,0 +1,3 @@
+waxell-observe[otel] @ git+https://github.com/waxell-ai/waxell-observe.git
+openai>=1.0
+python-dotenv>=1.0
