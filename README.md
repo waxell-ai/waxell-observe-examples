@@ -7,21 +7,68 @@ Every example works out of the box with `--dry-run` (no API keys needed).
 ## Quick Start
 
 ```bash
-# 1. Clone
+# 1. Clone and install
 git clone https://github.com/waxell-ai/waxell-observe-examples.git
 cd waxell-observe-examples
-
-# 2. Install
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Run (no API keys needed)
+# 2. Try it (no API keys needed)
 python examples/16_basic_quickstart/quickstart.py --dry-run
 ```
 
-That's it. You'll see mock LLM responses and the full agent pipeline running locally.
+You'll see mock LLM responses and the full agent pipeline running locally. No keys, no costs.
 
-To send traces to the Waxell platform, copy `.env.example` to `.env` and add your `WAXELL_API_KEY`.
+---
+
+## Connect to Waxell (see your traces in the dashboard)
+
+The examples work offline with `--dry-run`, but to see traces, token usage, and policy checks in the Waxell dashboard you need an API key.
+
+### Step 1: Create an account
+
+Go to [app.waxell.dev](https://app.waxell.dev) and sign up. Free tier is available.
+
+### Step 2: Get your API key
+
+1. Log in to [app.waxell.dev](https://app.waxell.dev)
+2. Go to **Settings > API Keys** ([direct link](https://app.waxell.dev/settings/api-keys))
+3. Click **Create API Key**
+4. Copy the key — it starts with `wax_sk_`
+
+### Step 3: Configure your environment
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and paste your key:
+
+```bash
+WAXELL_API_KEY=wax_sk_your_actual_key_here
+WAXELL_API_URL=https://api.waxell.dev
+```
+
+### Step 4: Run an example (for real this time)
+
+```bash
+# With a real LLM provider key
+OPENAI_API_KEY=sk-... python examples/16_basic_quickstart/quickstart.py
+
+# Or still use mock clients but send traces to Waxell
+python examples/01_anthropic_agent/anthropic_agent.py --dry-run
+```
+
+Even with `--dry-run`, if `WAXELL_API_KEY` is set the traces are sent to the platform. You can see them at [app.waxell.dev](https://app.waxell.dev).
+
+### Step 5: Check your dashboard
+
+Go to [app.waxell.dev](https://app.waxell.dev). You should see:
+
+- **Traces** — every LLM call, step, and decision in the pipeline
+- **Token usage** — input/output tokens per call
+- **Latency** — wall-clock time per step and total
+- **Policy checks** — any governance decisions that were made
 
 ---
 
@@ -122,18 +169,30 @@ Mock clients return realistic responses. No API keys, no costs, no network calls
 
 ## Environment Variables
 
-Copy `.env.example` to `.env`. All variables are optional for dry-run mode.
+Copy `.env.example` to `.env`. Everything is optional if you're just running `--dry-run`.
 
-| Variable | Required For | Description |
-|----------|-------------|-------------|
-| `WAXELL_API_KEY` | Sending traces | Platform API key ([get one here](https://app.waxell.dev/settings/api-keys)) |
-| `WAXELL_API_URL` | Custom endpoint | Default: `https://api.waxell.dev` |
-| `OPENAI_API_KEY` | Real OpenAI calls | |
-| `ANTHROPIC_API_KEY` | Real Anthropic calls | |
-| `GROQ_API_KEY` | Real Groq calls | |
-| `WAXELL_OBSERVE` | Kill switch | Set `false` to disable all telemetry |
-| `WAXELL_DEBUG` | Debugging | Console span export |
-| `WAXELL_CAPTURE_CONTENT` | Content capture | Include prompts/responses in traces (default: false) |
+**To send traces to Waxell:**
+
+| Variable | What to set | Where to get it |
+|----------|------------|-----------------|
+| `WAXELL_API_KEY` | `wax_sk_...` | [Settings > API Keys](https://app.waxell.dev/settings/api-keys) |
+| `WAXELL_API_URL` | `https://api.waxell.dev` | Already set in `.env.example` |
+
+**To use real LLM providers (instead of mock clients):**
+
+| Variable | Provider | Where to get it |
+|----------|---------|-----------------|
+| `OPENAI_API_KEY` | OpenAI | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| `ANTHROPIC_API_KEY` | Anthropic | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) |
+| `GROQ_API_KEY` | Groq | [console.groq.com/keys](https://console.groq.com/keys) |
+
+**Tuning:**
+
+| Variable | Default | What it does |
+|----------|---------|-------------|
+| `WAXELL_OBSERVE` | `true` | Set `false` to disable all telemetry |
+| `WAXELL_DEBUG` | `false` | Print spans to console (useful for debugging) |
+| `WAXELL_CAPTURE_CONTENT` | `false` | Include prompt/response text in traces (off by default for privacy) |
 
 ---
 
