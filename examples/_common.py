@@ -391,6 +391,59 @@ class _MockChat:
         self.completions = _MockCompletions()
 
 
+class _MockEmbeddingData:
+    """Mock embedding data point."""
+
+    def __init__(self, embedding: list[float], index: int = 0) -> None:
+        self.embedding = embedding
+        self.index = index
+        self.object = "embedding"
+
+
+class _MockEmbeddingUsage:
+    """Mock embedding usage."""
+
+    def __init__(self, total_tokens: int = 0) -> None:
+        self.total_tokens = total_tokens
+        self.prompt_tokens = total_tokens
+
+
+class _MockEmbeddingResponse:
+    """Mock embedding response."""
+
+    def __init__(self, data: list, usage: _MockEmbeddingUsage) -> None:
+        self.data = data
+        self.usage = usage
+        self.model = "text-embedding-3-small"
+        self.object = "list"
+
+
+class _MockAsyncEmbeddings:
+    """Mock for client.embeddings with async create()."""
+
+    async def create(self, **kwargs: Any) -> _MockEmbeddingResponse:
+        model = kwargs.get("model", "text-embedding-3-small")
+        input_data = kwargs.get("input", "")
+        if isinstance(input_data, str):
+            inputs = [input_data]
+        elif isinstance(input_data, list):
+            inputs = input_data
+        else:
+            inputs = [str(input_data)]
+
+        dim = 1536
+        data = [
+            _MockEmbeddingData(
+                embedding=[0.01 * (i + 1)] * dim, index=i,
+            )
+            for i in range(len(inputs))
+        ]
+        tokens = sum(len(t.split()) * 2 for t in inputs)
+        response = _MockEmbeddingResponse(data=data, usage=_MockEmbeddingUsage(total_tokens=tokens))
+        response.model = model
+        return response
+
+
 class MockAsyncOpenAI:
     """A mock async OpenAI client that returns contextual responses.
 
@@ -406,6 +459,7 @@ class MockAsyncOpenAI:
 
     def __init__(self, **kwargs: Any) -> None:
         self.chat = _MockChat()
+        self.embeddings = _MockAsyncEmbeddings()
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +900,214 @@ class MockAsyncGroq:
 
 
 # ---------------------------------------------------------------------------
+# Mock Mistral response objects
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _MockMistralUsage:
+    prompt_tokens: int = 150
+    completion_tokens: int = 80
+    total_tokens: int = 230
+
+
+@dataclass
+class _MockMistralChoice:
+    index: int = 0
+    message: _MockMessage = field(default_factory=_MockMessage)
+    finish_reason: str = "stop"
+
+
+class MockMistralCompletion:
+    """Mimics the Mistral ChatCompletionResponse."""
+
+    def __init__(self, content: str, model: str = "mistral-small-latest",
+                 prompt_tokens: int = 150, completion_tokens: int = 80):
+        self.id = "chatcmpl-mock-mistral-00001"
+        self.object = "chat.completion"
+        self.model = model
+        self.choices = [_MockMistralChoice(
+            message=_MockMessage(content=content),
+        )]
+        self.usage = _MockMistralUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+
+
+class _MockMistralChat:
+    async def complete_async(self, **kwargs: Any) -> MockMistralCompletion:
+        messages = kwargs.get("messages", [])
+        model = kwargs.get("model", "mistral-small-latest")
+        content = _contextual_response(messages)
+        return MockMistralCompletion(content=content, model=model)
+
+    def complete(self, **kwargs: Any) -> MockMistralCompletion:
+        messages = kwargs.get("messages", [])
+        model = kwargs.get("model", "mistral-small-latest")
+        content = _contextual_response(messages)
+        return MockMistralCompletion(content=content, model=model)
+
+
+class MockAsyncMistral:
+    """Mock Mistral client."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.chat = _MockMistralChat()
+
+
+# ---------------------------------------------------------------------------
+# Mock Cohere response objects
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _MockCohereTokens:
+    input_tokens: int = 150
+    output_tokens: int = 80
+
+
+@dataclass
+class _MockCohereUsage:
+    tokens: _MockCohereTokens = field(default_factory=_MockCohereTokens)
+    billed_units: _MockCohereTokens = field(default_factory=_MockCohereTokens)
+
+
+@dataclass
+class _MockCohereContentItem:
+    type: str = "text"
+    text: str = ""
+
+
+class MockCohereResponse:
+    """Mimics the Cohere V2 chat response."""
+
+    def __init__(self, content: str, model: str = "command-r"):
+        self.id = "chatcmpl-mock-cohere-00001"
+        self.message = type("Msg", (), {
+            "role": "assistant",
+            "content": [_MockCohereContentItem(text=content)],
+        })()
+        self.model = model
+        self.usage = _MockCohereUsage(
+            tokens=_MockCohereTokens(input_tokens=150, output_tokens=80),
+        )
+        self.finish_reason = "COMPLETE"
+
+
+class _MockCohereV2Chat:
+    async def chat(self, **kwargs: Any) -> MockCohereResponse:
+        messages = kwargs.get("messages", [])
+        model = kwargs.get("model", "command-r")
+        content = _contextual_response(messages)
+        return MockCohereResponse(content=content, model=model)
+
+
+class MockAsyncCohere:
+    """Mock Cohere V2 client."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.v2 = _MockCohereV2Chat()
+
+
+# ---------------------------------------------------------------------------
+# Mock Gemini response objects
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _MockGeminiUsageMetadata:
+    prompt_token_count: int = 150
+    candidates_token_count: int = 80
+    total_token_count: int = 230
+
+
+class MockGeminiResponse:
+    """Mimics the Google GenerativeAI response."""
+
+    def __init__(self, content: str):
+        self.text = content
+        self.usage_metadata = _MockGeminiUsageMetadata()
+        self.candidates = []
+
+
+class MockGeminiModel:
+    """Mock for google.generativeai.GenerativeModel."""
+
+    def __init__(self, model_name: str = "gemini-2.0-flash", **kwargs: Any):
+        self.model_name = model_name
+
+    async def generate_content_async(self, contents, **kwargs: Any) -> MockGeminiResponse:
+        text = str(contents) if isinstance(contents, str) else str(contents)
+        content = _contextual_response([{"role": "user", "content": text}])
+        return MockGeminiResponse(content=content)
+
+    def generate_content(self, contents, **kwargs: Any) -> MockGeminiResponse:
+        text = str(contents) if isinstance(contents, str) else str(contents)
+        content = _contextual_response([{"role": "user", "content": text}])
+        return MockGeminiResponse(content=content)
+
+
+# ---------------------------------------------------------------------------
+# Mock Bedrock response objects
+# ---------------------------------------------------------------------------
+
+
+class MockBedrockResponse:
+    """Mimics the Bedrock Converse response."""
+
+    def __init__(self, content: str, model: str = "amazon.nova-lite-v1:0"):
+        self._data = {
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"text": content}],
+                }
+            },
+            "usage": {
+                "inputTokens": 150,
+                "outputTokens": 80,
+                "totalTokens": 230,
+            },
+            "stopReason": "end_turn",
+            "ResponseMetadata": {"HTTPStatusCode": 200},
+        }
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+
+class MockBedrockClient:
+    """Mock for boto3 bedrock-runtime client."""
+
+    def __init__(self, **kwargs: Any):
+        pass
+
+    def converse(self, **kwargs: Any) -> dict:
+        messages = kwargs.get("messages", [])
+        model = kwargs.get("modelId", "amazon.nova-lite-v1:0")
+        content = _contextual_response(messages)
+        return {
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"text": content}],
+                }
+            },
+            "usage": {
+                "inputTokens": 150,
+                "outputTokens": 80,
+                "totalTokens": 230,
+            },
+            "stopReason": "end_turn",
+        }
+
+
+# ---------------------------------------------------------------------------
 # Client factories
 # ---------------------------------------------------------------------------
 
@@ -948,6 +1210,376 @@ def get_groq_client(dry_run: bool = False) -> Any:
 
     print("[Common] Using real Groq client")
     return AsyncGroq()
+
+
+def get_mistral_client(dry_run: bool = False) -> Any:
+    """Return a mock or real Mistral client."""
+    if dry_run or not os.environ.get("MISTRAL_API_KEY"):
+        mode = "dry-run" if dry_run else "no MISTRAL_API_KEY"
+        print(f"[Common] Using mock Mistral client ({mode})")
+        return MockAsyncMistral()
+
+    from mistralai import Mistral
+
+    print("[Common] Using real Mistral client")
+    return Mistral(api_key=os.environ["MISTRAL_API_KEY"])
+
+
+def get_cohere_client(dry_run: bool = False) -> Any:
+    """Return a mock or real Cohere client."""
+    if dry_run or not os.environ.get("COHERE_API_KEY"):
+        mode = "dry-run" if dry_run else "no COHERE_API_KEY"
+        print(f"[Common] Using mock Cohere client ({mode})")
+        return MockAsyncCohere()
+
+    import cohere
+
+    print("[Common] Using real Cohere client")
+    return cohere.AsyncClientV2(api_key=os.environ["COHERE_API_KEY"])
+
+
+def get_gemini_model(dry_run: bool = False, model_name: str = "gemini-2.0-flash") -> Any:
+    """Return a mock or real Gemini GenerativeModel."""
+    if dry_run or not os.environ.get("GOOGLE_API_KEY"):
+        mode = "dry-run" if dry_run else "no GOOGLE_API_KEY"
+        print(f"[Common] Using mock Gemini model ({mode})")
+        return MockGeminiModel(model_name=model_name)
+
+    import google.generativeai as genai
+
+    genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+    print(f"[Common] Using real Gemini model ({model_name})")
+    return genai.GenerativeModel(model_name)
+
+
+def get_bedrock_client(dry_run: bool = False) -> Any:
+    """Return a mock or real Bedrock runtime client."""
+    if dry_run or not os.environ.get("AWS_ACCESS_KEY_ID"):
+        mode = "dry-run" if dry_run else "no AWS credentials"
+        print(f"[Common] Using mock Bedrock client ({mode})")
+        return MockBedrockClient()
+
+    import boto3
+
+    print("[Common] Using real Bedrock client")
+    return boto3.client("bedrock-runtime")
+
+
+# ---------------------------------------------------------------------------
+# Mock Ollama response objects
+# ---------------------------------------------------------------------------
+
+
+class MockOllamaResponse:
+    """Mimics the Ollama chat/generate response dict-like object."""
+
+    def __init__(self, content: str, model: str = "llama3.2"):
+        self._data = {
+            "model": model,
+            "message": {"role": "assistant", "content": content},
+            "done": True,
+            "total_duration": 1500000000,
+            "prompt_eval_count": 150,
+            "eval_count": 80,
+        }
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def __contains__(self, key):
+        return key in self._data
+
+
+class MockOllamaClient:
+    """Mock for ollama.Client (sync)."""
+
+    def __init__(self, host: str = "http://localhost:11434", **kwargs: Any):
+        self.host = host
+
+    def chat(self, model: str = "llama3.2", messages: list | None = None, **kwargs: Any):
+        content = _contextual_response(messages or [])
+        return MockOllamaResponse(content=content, model=model)
+
+    def generate(self, model: str = "llama3.2", prompt: str = "", **kwargs: Any):
+        content = _contextual_response([{"role": "user", "content": prompt}])
+        return {
+            "model": model,
+            "response": content,
+            "done": True,
+            "total_duration": 1500000000,
+            "prompt_eval_count": 150,
+            "eval_count": 80,
+        }
+
+
+class MockAsyncOllamaClient:
+    """Mock for ollama.AsyncClient."""
+
+    def __init__(self, host: str = "http://localhost:11434", **kwargs: Any):
+        self.host = host
+
+    async def chat(self, model: str = "llama3.2", messages: list | None = None, **kwargs: Any):
+        content = _contextual_response(messages or [])
+        return MockOllamaResponse(content=content, model=model)
+
+    async def generate(self, model: str = "llama3.2", prompt: str = "", **kwargs: Any):
+        content = _contextual_response([{"role": "user", "content": prompt}])
+        return {
+            "model": model,
+            "response": content,
+            "done": True,
+            "total_duration": 1500000000,
+            "prompt_eval_count": 150,
+            "eval_count": 80,
+        }
+
+
+def get_ollama_client(dry_run: bool = False, sync: bool = False) -> Any:
+    """Return a mock or real Ollama client."""
+    if dry_run or not os.environ.get("OLLAMA_HOST", ""):
+        mode = "dry-run" if dry_run else "mock (no OLLAMA_HOST)"
+        print(f"[Common] Using mock Ollama client ({mode})")
+        return MockOllamaClient() if sync else MockAsyncOllamaClient()
+
+    import ollama
+    host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    print(f"[Common] Using real Ollama client ({host})")
+    return ollama.Client(host=host) if sync else ollama.AsyncClient(host=host)
+
+
+# ---------------------------------------------------------------------------
+# Mock Together response objects (OpenAI-compatible)
+# ---------------------------------------------------------------------------
+
+
+class _MockTogetherCompletions:
+    """Mock for together_client.chat.completions."""
+
+    async def create(self, **kwargs: Any) -> MockChatCompletion:
+        messages = kwargs.get("messages", [])
+        model = kwargs.get("model", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
+        content = _contextual_response(messages)
+        return MockChatCompletion(content=content, model=model)
+
+
+class _MockTogetherChat:
+    def __init__(self) -> None:
+        self.completions = _MockTogetherCompletions()
+
+
+class MockAsyncTogether:
+    """Mock for together.AsyncTogether (OpenAI-compatible)."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.chat = _MockTogetherChat()
+
+
+def get_together_client(dry_run: bool = False) -> Any:
+    """Return a mock or real Together AI async client."""
+    if dry_run or not os.environ.get("TOGETHER_API_KEY"):
+        mode = "dry-run" if dry_run else "no TOGETHER_API_KEY"
+        print(f"[Common] Using mock Together client ({mode})")
+        return MockAsyncTogether()
+
+    from together import AsyncTogether
+    print("[Common] Using real Together client")
+    return AsyncTogether()
+
+
+# ---------------------------------------------------------------------------
+# Mock HuggingFace response objects
+# ---------------------------------------------------------------------------
+
+
+class MockHuggingFaceClient:
+    """Mock for huggingface_hub.InferenceClient."""
+
+    def __init__(self, model: str = "meta-llama/Llama-3.2-3B-Instruct", **kwargs: Any):
+        self.model = model
+
+    def text_generation(self, prompt: str, **kwargs: Any) -> str:
+        content = _contextual_response([{"role": "user", "content": prompt}])
+        return content
+
+    def chat_completion(self, messages: list | None = None, **kwargs: Any):
+        content = _contextual_response(messages or [])
+        return MockChatCompletion(content=content, model=self.model)
+
+
+def get_huggingface_client(dry_run: bool = False, model: str = "meta-llama/Llama-3.2-3B-Instruct") -> Any:
+    """Return a mock or real HuggingFace InferenceClient."""
+    if dry_run or not os.environ.get("HF_TOKEN"):
+        mode = "dry-run" if dry_run else "no HF_TOKEN"
+        print(f"[Common] Using mock HuggingFace client ({mode})")
+        return MockHuggingFaceClient(model=model)
+
+    from huggingface_hub import InferenceClient
+    print(f"[Common] Using real HuggingFace client ({model})")
+    return InferenceClient(model=model, token=os.environ["HF_TOKEN"])
+
+
+# ---------------------------------------------------------------------------
+# Mock Milvus objects
+# ---------------------------------------------------------------------------
+
+
+class MockMilvusSearchResult:
+    """Single search hit."""
+
+    def __init__(self, id: int, distance: float, entity: dict):
+        self.id = id
+        self.distance = distance
+        self.entity = entity
+
+    def __getitem__(self, key):
+        if key == "id":
+            return self.id
+        if key == "distance":
+            return self.distance
+        return self.entity.get(key)
+
+
+class MockMilvusCollection:
+    """Mock for pymilvus.Collection."""
+
+    def __init__(self, name: str = "demo_collection", **kwargs: Any):
+        self.name = name
+        self._data: list[dict] = []
+
+    def insert(self, data: list, **kwargs: Any) -> dict:
+        """Mock insert that stores data."""
+        count = len(data[0]) if data and isinstance(data[0], list) else len(data)
+        return {"insert_count": count, "ids": list(range(count))}
+
+    def search(self, data: list, anns_field: str = "embedding", param: dict | None = None,
+               limit: int = 5, output_fields: list | None = None, **kwargs: Any) -> list[list]:
+        """Mock search returning fake results."""
+        results = [
+            MockMilvusSearchResult(i, 0.95 - i * 0.1, {"text": f"Document {i} about AI safety", "source": f"doc-{i}"})
+            for i in range(min(limit, 3))
+        ]
+        return [results]
+
+    def query(self, expr: str = "", output_fields: list | None = None, **kwargs: Any) -> list[dict]:
+        """Mock query."""
+        return [
+            {"id": 0, "text": "AI safety best practices document", "source": "doc-0"},
+            {"id": 1, "text": "Model deployment guidelines", "source": "doc-1"},
+        ]
+
+    def delete(self, expr: str = "", **kwargs: Any) -> dict:
+        return {"delete_count": 1}
+
+    def load(self) -> None:
+        pass
+
+    def release(self) -> None:
+        pass
+
+
+def get_milvus_collection(dry_run: bool = False, name: str = "demo_collection") -> Any:
+    """Return a mock or real Milvus Collection."""
+    if dry_run or not os.environ.get("MILVUS_URI"):
+        mode = "dry-run" if dry_run else "mock (no MILVUS_URI)"
+        print(f"[Common] Using mock Milvus collection ({mode})")
+        return MockMilvusCollection(name=name)
+
+    from pymilvus import Collection
+    print(f"[Common] Using real Milvus collection ({name})")
+    return Collection(name=name)
+
+
+# ---------------------------------------------------------------------------
+# Mock MongoDB objects (for vector search)
+# ---------------------------------------------------------------------------
+
+
+class MockMongoCollection:
+    """Mock for pymongo.collection.Collection with $vectorSearch aggregate."""
+
+    def __init__(self, name: str = "documents", **kwargs: Any):
+        self.name = name
+
+    def aggregate(self, pipeline: list, **kwargs: Any) -> list[dict]:
+        """Mock aggregate that detects $vectorSearch stage."""
+        results = [
+            {"_id": "doc1", "text": "AI safety best practices", "score": 0.95},
+            {"_id": "doc2", "text": "Model deployment patterns", "score": 0.88},
+            {"_id": "doc3", "text": "Cost optimization strategies", "score": 0.82},
+        ]
+        return results
+
+    def insert_many(self, documents: list, **kwargs: Any) -> Any:
+        class MockInsertResult:
+            inserted_ids = [f"id_{i}" for i in range(len(documents))]
+        return MockInsertResult()
+
+    def find(self, filter: dict | None = None, **kwargs: Any) -> list[dict]:
+        return [{"_id": "doc1", "text": "Sample document", "embedding": [0.1] * 10}]
+
+
+def get_mongo_collection(dry_run: bool = False, db_name: str = "demo", collection_name: str = "documents") -> Any:
+    """Return a mock or real MongoDB collection."""
+    if dry_run or not os.environ.get("MONGODB_URI"):
+        mode = "dry-run" if dry_run else "mock (no MONGODB_URI)"
+        print(f"[Common] Using mock MongoDB collection ({mode})")
+        return MockMongoCollection(name=collection_name)
+
+    from pymongo import MongoClient
+    client = MongoClient(os.environ["MONGODB_URI"])
+    print(f"[Common] Using real MongoDB collection ({db_name}.{collection_name})")
+    return client[db_name][collection_name]
+
+
+# ---------------------------------------------------------------------------
+# Mock Elasticsearch objects
+# ---------------------------------------------------------------------------
+
+
+class MockElasticsearchClient:
+    """Mock for elasticsearch.Elasticsearch."""
+
+    def __init__(self, hosts: list | str | None = None, **kwargs: Any):
+        self.hosts = hosts
+
+    def search(self, index: str = "documents", body: dict | None = None,
+               knn: dict | None = None, **kwargs: Any) -> dict:
+        """Mock search that handles both text and knn queries."""
+        return {
+            "hits": {
+                "total": {"value": 3, "relation": "eq"},
+                "hits": [
+                    {"_id": "1", "_score": 0.95, "_source": {"text": "AI safety guidelines", "title": "Safety"}},
+                    {"_id": "2", "_score": 0.88, "_source": {"text": "Model deployment best practices", "title": "Deployment"}},
+                    {"_id": "3", "_score": 0.82, "_source": {"text": "Cost optimization strategies", "title": "Cost"}},
+                ],
+            }
+        }
+
+    def knn_search(self, index: str = "documents", knn: dict | None = None, **kwargs: Any) -> dict:
+        return self.search(index=index, knn=knn)
+
+    def index(self, index: str = "documents", document: dict | None = None, **kwargs: Any) -> dict:
+        return {"_id": "new_doc_1", "result": "created"}
+
+    def bulk(self, body: list | None = None, **kwargs: Any) -> dict:
+        return {"errors": False, "items": []}
+
+
+def get_elasticsearch_client(dry_run: bool = False) -> Any:
+    """Return a mock or real Elasticsearch client."""
+    if dry_run or not os.environ.get("ELASTICSEARCH_URL"):
+        mode = "dry-run" if dry_run else "mock (no ELASTICSEARCH_URL)"
+        print(f"[Common] Using mock Elasticsearch client ({mode})")
+        return MockElasticsearchClient()
+
+    from elasticsearch import Elasticsearch
+    url = os.environ["ELASTICSEARCH_URL"]
+    print(f"[Common] Using real Elasticsearch client ({url})")
+    return Elasticsearch(url)
 
 
 # ---------------------------------------------------------------------------
