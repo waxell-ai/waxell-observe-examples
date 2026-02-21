@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Customer support agent demo with agentic behavior tracking.
+"""Customer support agent demo with modern decorator patterns.
 
-Demonstrates waxell-observe's behavior tracking methods through a customer
-support pipeline that classifies intent, looks up orders, checks inventory,
-makes routing decisions, handles retries/fallbacks, and generates responses.
+Demonstrates waxell-observe's decorator-first SDK through a customer support
+pipeline: classify intent, look up orders, check inventory, make routing
+decisions, handle retries/fallbacks, and generate responses.
+
+Multi-agent architecture:
+  support-orchestrator (parent)
+  ├── support-handler (child) — intent classification, order lookup, decisions
+  └── support-evaluator (child) — response generation, confidence routing
 
 Usage::
 
@@ -22,7 +27,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import asyncio
-import os
 
 # CRITICAL: init() BEFORE importing openai so auto-instrumentor can patch it
 from _common import setup_observe
@@ -30,8 +34,8 @@ from _common import setup_observe
 setup_observe()
 
 # NOW safe to import openai (auto-instrumentor has patched it)
-import waxell_observe
-from waxell_observe import WaxellContext, generate_session_id
+import waxell_observe as waxell
+from waxell_observe import generate_session_id
 from waxell_observe.errors import PolicyViolationError
 
 from _common import (
@@ -45,313 +49,336 @@ from _common import (
 
 DEFAULT_QUERY = "Where is my order ORD-12345? I placed it last week and haven't received any updates."
 
+# ---------------------------------------------------------------------------
+# Mock data
+# ---------------------------------------------------------------------------
 
-async def run_support_agent(
-    query: str,
-    client: object,
-    observe_active: bool = True,
-    session: str = "",
-    user_id: str = "",
-    user_group: str = "",
-    dry_run: bool = True,
-) -> dict:
-    """Execute the customer support agent pipeline.
+ORDER_DATA = {
+    "order_id": "ORD-12345",
+    "status": "shipped",
+    "tracking_number": "1Z999AA10123456784",
+    "carrier": "UPS",
+    "estimated_delivery": "2024-03-15",
+    "items": [
+        {"name": "Wireless Headphones", "quantity": 1, "price": 79.99},
+        {"name": "USB-C Cable", "quantity": 2, "price": 12.99},
+    ],
+}
 
-    Args:
-        query: The customer support query.
-        client: OpenAI-compatible async client (real or mock).
-        observe_active: Whether observe/governance is active.
-        session: Session ID for trace correlation.
-        user_id: End-user identifier.
-        user_group: End-user group/tier.
-        dry_run: Whether to use mock clients.
+INVENTORY_DATA = {
+    "product_id": "PROD-789",
+    "product_name": "Wireless Headphones",
+    "in_stock": True,
+    "quantity_available": 42,
+    "warehouse": "US-WEST-1",
+    "restock_date": None,
+}
 
-    Returns:
-        Dict with support interaction results.
-    """
-    async with WaxellContext(
-        agent_name="support-agent",
-        workflow_name="customer-support",
-        inputs={"query": query},
-        enforce_policy=observe_active,
-        session_id=session,
-        user_id=user_id,
-        user_group=user_group,
-        mid_execution_governance=observe_active,
-        client=get_observe_client(),
-    ) as ctx:
-        ctx.set_tag("demo", "support")
-        ctx.set_tag("pipeline", "customer-support")
-        ctx.set_metadata("channel", "chat")
 
-        try:
-            # ------------------------------------------------------------------
-            # Step 1: Classify Intent (LLM + reasoning)
-            # ------------------------------------------------------------------
-            print("[Support] Step 1: Classifying customer intent...")
+# ---------------------------------------------------------------------------
+# @step decorator — auto-record execution steps
+# ---------------------------------------------------------------------------
 
-            classify_response = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a customer support intent classifier. "
-                            "Classify the query into: order_status, refund_request, "
-                            "product_inquiry, complaint, general_help."
-                        ),
-                    },
-                    {"role": "user", "content": query},
-                ],
-            )
-            classification = classify_response.choices[0].message.content
 
-            ctx.record_step("classify_intent", output={"intent": "order_status"})
-            ctx.record_llm_call(
-                model=classify_response.model,
-                tokens_in=classify_response.usage.prompt_tokens,
-                tokens_out=classify_response.usage.completion_tokens,
-                task="classify_intent",
-                prompt_preview=query[:200],
-                response_preview=classification[:200],
-            )
+@waxell.step_dec(name="classify_intent")
+async def classify_intent_step(classification: str) -> dict:
+    """Record intent classification step."""
+    return {"intent": "order_status", "raw_classification": classification[:100]}
 
-            # Reasoning about the classification
-            ctx.record_reasoning(
-                step="analyze_intent",
-                thought=(
-                    "Customer mentions 'order ORD-12345' and asks 'where is my order', "
-                    "strongly indicating an order status inquiry. No mention of refund, "
-                    "return, or complaint keywords. The phrase 'haven't received any updates' "
-                    "suggests frustration but the primary intent is tracking information."
+
+# ---------------------------------------------------------------------------
+# @tool decorators — auto-record tool calls
+# ---------------------------------------------------------------------------
+
+
+@waxell.tool(tool_type="database")
+def order_lookup(order_id: str) -> dict:
+    """Look up an order by ID."""
+    return ORDER_DATA
+
+
+@waxell.tool(tool_type="database")
+def inventory_check(product_id: str) -> dict:
+    """Check inventory for a product."""
+    return INVENTORY_DATA
+
+
+# ---------------------------------------------------------------------------
+# @decision decorator — auto-record routing decisions
+# ---------------------------------------------------------------------------
+
+
+@waxell.decision(name="order_found", options=["process_order", "order_not_found"])
+async def decide_order_found(order_data: dict) -> dict:
+    """Decide whether to process a found order."""
+    return {
+        "chosen": "process_order",
+        "reasoning": f"Order {order_data['order_id']} found in database with valid status",
+    }
+
+
+@waxell.decision(name="refund_requested", options=["process_refund", "provide_status", "escalate"])
+async def decide_refund_or_status(classification: str) -> dict:
+    """Decide what the customer wants based on classification."""
+    return {
+        "chosen": "provide_status",
+        "reasoning": "Customer asking about shipping status, not requesting refund or escalation",
+    }
+
+
+@waxell.decision(name="response_type", options=["automated_response", "human_handoff"])
+async def decide_response_type() -> dict:
+    """Decide if we can auto-respond or need human handoff."""
+    return {
+        "chosen": "automated_response",
+        "reasoning": "Order status query with clear tracking data available; no ambiguity requiring human judgment",
+    }
+
+
+@waxell.decision(name="confidence_routing", options=["send_response", "add_disclaimer", "escalate_to_human"])
+async def decide_confidence_routing() -> dict:
+    """Final confidence routing decision."""
+    return {
+        "chosen": "send_response",
+        "reasoning": (
+            "All decision points resolved with confidence >= 0.85. "
+            "Order data is unambiguous. Response generated successfully "
+            "after fallback. No escalation triggers detected."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# @reasoning decorator — auto-record chain-of-thought
+# ---------------------------------------------------------------------------
+
+
+@waxell.reasoning_dec(step="analyze_intent")
+async def analyze_intent(query: str) -> dict:
+    """Analyze the customer intent via reasoning chain."""
+    return {
+        "thought": (
+            "Customer mentions 'order ORD-12345' and asks 'where is my order', "
+            "strongly indicating an order status inquiry. No mention of refund, "
+            "return, or complaint keywords. The phrase 'haven't received any updates' "
+            "suggests frustration but the primary intent is tracking information."
+        ),
+        "evidence": ["keyword:order", "keyword:where", "phrase:haven't received updates"],
+        "conclusion": "Intent classified as order_status with high confidence",
+    }
+
+
+# ---------------------------------------------------------------------------
+# @retry decorator — auto-record retry attempts
+# ---------------------------------------------------------------------------
+
+
+@waxell.retry_dec(max_attempts=3, strategy="fallback")
+async def generate_response_with_retry(client, prompt: str):
+    """Generate response with automatic retry recording on failure."""
+    return await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a friendly customer support agent. Provide "
+                    "helpful, empathetic responses with specific order details."
                 ),
-                evidence=["keyword:order", "keyword:where", "phrase:haven't received updates"],
-                conclusion="Intent classified as order_status with high confidence",
-            )
-            print(f"           Intent: order_status (via reasoning chain)")
+            },
+            {"role": "user", "content": prompt},
+        ],
+    )
 
-            # ------------------------------------------------------------------
-            # Step 2: Order Lookup (tool call)
-            # ------------------------------------------------------------------
-            print("[Support] Step 2: Looking up order...")
 
-            order_data = {
-                "order_id": "ORD-12345",
-                "status": "shipped",
-                "tracking_number": "1Z999AA10123456784",
-                "carrier": "UPS",
-                "estimated_delivery": "2024-03-15",
-                "items": [
-                    {"name": "Wireless Headphones", "quantity": 1, "price": 79.99},
-                    {"name": "USB-C Cable", "quantity": 2, "price": 12.99},
-                ],
-            }
+# ---------------------------------------------------------------------------
+# Child Agent 1: support-handler — classification + lookup + decisions
+# ---------------------------------------------------------------------------
 
-            ctx.record_tool_call(
-                name="order_lookup",
-                input={"order_id": "ORD-12345"},
-                output=order_data,
-                duration_ms=120,
-                status="ok",
-                tool_type="database",
-            )
-            print(f"           Order found: {order_data['status']} via {order_data['carrier']}")
 
-            # ------------------------------------------------------------------
-            # Step 3: Inventory Check (tool call)
-            # ------------------------------------------------------------------
-            print("[Support] Step 3: Checking inventory for related items...")
+@waxell.observe(agent_name="support-handler", workflow_name="support-classification")
+async def run_support_handler(query: str, openai_client, waxell_ctx=None) -> dict:
+    """Handle intent classification, order lookup, and routing decisions."""
+    waxell.tag("agent_role", "handler")
+    waxell.tag("provider", "openai")
 
-            inventory_data = {
-                "product_id": "PROD-789",
-                "product_name": "Wireless Headphones",
-                "in_stock": True,
-                "quantity_available": 42,
-                "warehouse": "US-WEST-1",
-                "restock_date": None,
-            }
-
-            ctx.record_tool_call(
-                name="inventory_check",
-                input={"product_id": "PROD-789"},
-                output=inventory_data,
-                duration_ms=85,
-                status="ok",
-                tool_type="database",
-            )
-            print(f"           Inventory: {inventory_data['quantity_available']} units in stock")
-
-            # ------------------------------------------------------------------
-            # Step 4: Decision Tree (3 levels)
-            # ------------------------------------------------------------------
-            print("[Support] Step 4: Processing decision tree...")
-
-            # Decision 1: Order found?
-            ctx.record_decision(
-                name="order_found",
-                options=["process_order", "order_not_found"],
-                chosen="process_order",
-                reasoning="Order ORD-12345 found in database with valid status",
-                confidence=1.0,
-            )
-            print("           [1/3] order_found -> process_order (confidence: 1.0)")
-
-            # Decision 2: What does the customer want?
-            ctx.record_decision(
-                name="refund_requested",
-                options=["process_refund", "provide_status", "escalate"],
-                chosen="provide_status",
-                reasoning="Customer asking about shipping status, not requesting refund or escalation",
-                confidence=0.85,
-            )
-            print("           [2/3] refund_requested -> provide_status (confidence: 0.85)")
-
-            # Decision 3: Can we auto-respond?
-            ctx.record_decision(
-                name="response_type",
-                options=["automated_response", "human_handoff"],
-                chosen="automated_response",
-                reasoning="Order status query with clear tracking data available; no ambiguity requiring human judgment",
-                confidence=0.91,
-            )
-            print("           [3/3] response_type -> automated_response (confidence: 0.91)")
-
-            # ------------------------------------------------------------------
-            # Step 5: Generate Response with Retry
-            # ------------------------------------------------------------------
-            print("[Support] Step 5: Generating response (with retry demo)...")
-
-            # Simulate rate limit on first attempt
-            ctx.record_retry(
-                attempt=1,
-                reason="Rate limit exceeded",
-                strategy="retry",
-                original_error="429 Too Many Requests",
-                fallback_to="gpt-4o-mini",
-                max_attempts=3,
-            )
-            print("           Attempt 1: 429 Too Many Requests")
-
-            # Simulate fallback to smaller model
-            ctx.record_retry(
-                attempt=2,
-                reason="Fallback to smaller model after rate limit",
-                strategy="fallback",
-                fallback_to="gpt-4o-mini",
-                max_attempts=3,
-            )
-            print("           Attempt 2: Falling back to gpt-4o-mini")
-
-            # Use a failing client for the first attempt, then succeed
-            failing_client = MockFailingOpenAI(
-                fail_count=1,
-                error_message="429 Too Many Requests",
-            )
-
-            # First attempt fails
-            try:
-                await failing_client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role": "user", "content": "test"}],
-                )
-            except Exception:
-                pass  # Expected failure, already recorded retry above
-
-            # Second attempt succeeds with fallback model
-            response_prompt = (
-                f"Customer query: {query}\n\n"
-                f"Order details:\n"
-                f"- Order ID: {order_data['order_id']}\n"
-                f"- Status: {order_data['status']}\n"
-                f"- Carrier: {order_data['carrier']}\n"
-                f"- Tracking: {order_data['tracking_number']}\n"
-                f"- Estimated delivery: {order_data['estimated_delivery']}\n\n"
-                "Generate a friendly, helpful customer support response."
-            )
-
-            gen_response = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a friendly customer support agent. Provide "
-                            "helpful, empathetic responses with specific order details."
-                        ),
-                    },
-                    {"role": "user", "content": response_prompt},
-                ],
-            )
-            support_reply = gen_response.choices[0].message.content
-
-            ctx.record_step("generate_response", output={"response_length": len(support_reply)})
-            ctx.record_llm_call(
-                model="gpt-4o-mini",
-                tokens_in=gen_response.usage.prompt_tokens,
-                tokens_out=gen_response.usage.completion_tokens,
-                task="generate_response",
-                prompt_preview=response_prompt[:200],
-                response_preview=support_reply[:200],
-            )
-            print(f"           Response generated ({len(support_reply)} chars) via gpt-4o-mini")
-
-            # ------------------------------------------------------------------
-            # Step 6: Confidence Routing
-            # ------------------------------------------------------------------
-            print("[Support] Step 6: Confidence routing...")
-
-            ctx.record_decision(
-                name="confidence_routing",
-                options=["send_response", "add_disclaimer", "escalate_to_human"],
-                chosen="send_response",
-                reasoning=(
-                    "All decision points resolved with confidence >= 0.85. "
-                    "Order data is unambiguous. Response generated successfully "
-                    "after fallback. No escalation triggers detected."
+    # Step 1: Classify Intent (LLM + reasoning)
+    print("[Support Handler] Step 1: Classifying customer intent...")
+    classify_response = await openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a customer support intent classifier. "
+                    "Classify the query into: order_status, refund_request, "
+                    "product_inquiry, complaint, general_help."
                 ),
-                confidence=0.92,
-            )
-            print("           Routing: send_response (confidence: 0.92)")
+            },
+            {"role": "user", "content": query},
+        ],
+    )
+    classification = classify_response.choices[0].message.content
 
-            # ------------------------------------------------------------------
-            # Set final result
-            # ------------------------------------------------------------------
-            result = {
-                "response": support_reply,
-                "intent": "order_status",
-                "order_id": "ORD-12345",
-                "resolution": "automated_response",
-                "model_used": "gpt-4o-mini",
-                "retries": 2,
-            }
-            ctx.set_result(result)
+    await classify_intent_step(classification)
+    reasoning = await analyze_intent(query)
+    print(f"           Intent: order_status (via reasoning chain)")
 
-            print()
-            print(f"[Support] Response: {support_reply[:200]}...")
-            print(
-                f"[Support] Complete. "
-                f"(2 LLM calls, 2 tool calls, 1 reasoning step, "
-                f"4 decisions, 2 retries)"
-            )
-            return result
+    # Step 2: Order Lookup (tool call)
+    print("[Support Handler] Step 2: Looking up order...")
+    order_data = order_lookup(order_id="ORD-12345")
+    print(f"           Order found: {order_data['status']} via {order_data['carrier']}")
 
-        except PolicyViolationError as e:
-            print(f"\n[Support] POLICY VIOLATION: {e}")
-            print("[Support] Agent halted by governance policy.")
-            return {"error": str(e)}
+    # Step 3: Inventory Check (tool call)
+    print("[Support Handler] Step 3: Checking inventory for related items...")
+    inv_data = inventory_check(product_id="PROD-789")
+    print(f"           Inventory: {inv_data['quantity_available']} units in stock")
+
+    # Step 4: Decision Tree (3 levels)
+    print("[Support Handler] Step 4: Processing decision tree...")
+    d1 = await decide_order_found(order_data)
+    print(f"           [1/3] order_found -> {d1['chosen']}")
+
+    d2 = await decide_refund_or_status(classification)
+    print(f"           [2/3] refund_requested -> {d2['chosen']}")
+
+    d3 = await decide_response_type()
+    print(f"           [3/3] response_type -> {d3['chosen']}")
+
+    return {
+        "classification": classification,
+        "order_data": order_data,
+        "inventory_data": inv_data,
+        "decisions": [d1, d2, d3],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Child Agent 2: support-evaluator — response generation + confidence
+# ---------------------------------------------------------------------------
+
+
+@waxell.observe(agent_name="support-evaluator", workflow_name="support-response")
+async def run_support_evaluator(query: str, order_data: dict, openai_client, waxell_ctx=None) -> dict:
+    """Generate the support response with retry and confidence routing."""
+    waxell.tag("agent_role", "evaluator")
+    waxell.tag("provider", "openai")
+
+    # Step 5: Generate Response with Retry
+    print("[Support Evaluator] Step 5: Generating response (with retry demo)...")
+
+    # Simulate rate limit on first attempt using MockFailingOpenAI
+    failing_client = MockFailingOpenAI(
+        fail_count=1,
+        error_message="429 Too Many Requests",
+    )
+    try:
+        await failing_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "test"}],
+        )
+    except Exception:
+        pass  # Expected failure for retry demo
+    print("           Attempt 1: 429 Too Many Requests")
+    print("           Attempt 2: Falling back to gpt-4o-mini")
+
+    response_prompt = (
+        f"Customer query: {query}\n\n"
+        f"Order details:\n"
+        f"- Order ID: {order_data['order_id']}\n"
+        f"- Status: {order_data['status']}\n"
+        f"- Carrier: {order_data['carrier']}\n"
+        f"- Tracking: {order_data['tracking_number']}\n"
+        f"- Estimated delivery: {order_data['estimated_delivery']}\n\n"
+        "Generate a friendly, helpful customer support response."
+    )
+
+    gen_response = await generate_response_with_retry(openai_client, response_prompt)
+    support_reply = gen_response.choices[0].message.content
+    print(f"           Response generated ({len(support_reply)} chars) via gpt-4o-mini")
+
+    # Step 6: Confidence Routing
+    print("[Support Evaluator] Step 6: Confidence routing...")
+    d4 = await decide_confidence_routing()
+    print(f"           Routing: {d4['chosen']}")
+
+    # Scores
+    waxell.score("classification_confidence", 0.88)
+    waxell.score("response_quality", "good", data_type="categorical", comment="Auto-generated response")
+    waxell.score("sla_met", True, data_type="boolean")
+
+    return {
+        "response": support_reply,
+        "model_used": "gpt-4o-mini",
+        "retries": 2,
+        "routing": d4["chosen"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Parent Orchestrator: support-orchestrator
+# ---------------------------------------------------------------------------
+
+
+@waxell.observe(agent_name="support-orchestrator", workflow_name="customer-support")
+async def run_support_pipeline(query: str, dry_run: bool = False, waxell_ctx=None) -> dict:
+    """Coordinate the full customer support pipeline across child agents."""
+    waxell.tag("demo", "support")
+    waxell.tag("pipeline", "customer-support")
+    waxell.metadata("channel", "chat")
+    waxell.metadata("mode", "dry-run" if dry_run else "live")
+
+    openai_client = get_openai_client(dry_run=dry_run)
+
+    # Phase 1: support-handler child agent
+    print("[Support Orchestrator] Phase 1: Handling request (support-handler)...")
+    handler_result = await run_support_handler(
+        query=query,
+        openai_client=openai_client,
+    )
+    print()
+
+    # Phase 2: support-evaluator child agent
+    print("[Support Orchestrator] Phase 2: Evaluating response (support-evaluator)...")
+    eval_result = await run_support_evaluator(
+        query=query,
+        order_data=handler_result["order_data"],
+        openai_client=openai_client,
+    )
+
+    result = {
+        "response": eval_result["response"],
+        "intent": "order_status",
+        "order_id": "ORD-12345",
+        "resolution": "automated_response",
+        "model_used": eval_result["model_used"],
+        "retries": eval_result["retries"],
+        "pipeline": "support-orchestrator -> support-handler -> support-evaluator",
+    }
+
+    print()
+    print(f"[Support Orchestrator] Response: {eval_result['response'][:200]}...")
+    print(
+        f"[Support Orchestrator] Complete. "
+        f"(2 LLM calls, 2 tool calls, 1 reasoning step, "
+        f"4 decisions, 2 retries)"
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 
 async def main() -> None:
     args = parse_args()
     query = args.query or DEFAULT_QUERY
-
-    client = get_openai_client(dry_run=args.dry_run)
     session = generate_session_id()
-    observe_active = not is_observe_disabled()
-
     demo_user = pick_demo_user()
     user_id = args.user_id or demo_user["user_id"]
     user_group = args.user_group or demo_user["user_group"]
+    observe_active = not is_observe_disabled()
 
     print("[Support Agent] Starting customer support pipeline...")
     print(f"[Support Agent] Session: {session}")
@@ -359,17 +386,22 @@ async def main() -> None:
     print(f"[Support Agent] Query: {query[:80]}...")
     print()
 
-    await run_support_agent(
-        query=query,
-        client=client,
-        observe_active=observe_active,
-        session=session,
-        user_id=user_id,
-        user_group=user_group,
-        dry_run=args.dry_run,
-    )
+    try:
+        await run_support_pipeline(
+            query=query,
+            dry_run=args.dry_run,
+            session_id=session,
+            user_id=user_id,
+            user_group=user_group,
+            enforce_policy=observe_active,
+            mid_execution_governance=observe_active,
+            client=get_observe_client(),
+        )
+    except PolicyViolationError as e:
+        print(f"\n[Support Agent] POLICY VIOLATION: {e}")
+        print("[Support Agent] Agent halted by governance policy.")
 
-    waxell_observe.shutdown()
+    waxell.shutdown()
 
 
 if __name__ == "__main__":

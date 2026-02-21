@@ -76,8 +76,8 @@ def setup_observe(
 ) -> None:
     """Initialize waxell-observe. Must be called BEFORE importing openai.
 
-    Reads WAXELL_API_KEY and WAXELL_API_URL from environment. If neither is
-    set the library still initializes (HTTP calls will be no-ops).
+    Loads .env via dotenv and maps WAX_API_KEY/WAX_API_URL to WAXELL_*
+    env vars so the observe SDK picks them up.
 
     Args:
         debug: Enable console span export for demo visibility.
@@ -91,11 +91,20 @@ def setup_observe(
     # Ensure waxell_observe warnings are visible in subprocess output
     logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
 
+    # Load .env and map WAX_* → WAXELL_* for the observe SDK
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    api_key = os.environ.get("WAXELL_API_KEY") or os.environ.get("WAX_API_KEY", "")
+    api_url = os.environ.get("WAXELL_API_URL") or os.environ.get("WAX_API_URL", "http://localhost:8001")
+
     import waxell_observe
 
     waxell_observe.init(
-        api_key=os.environ.get("WAXELL_API_KEY", ""),
-        api_url=os.environ.get("WAXELL_API_URL", "http://localhost:8001"),
+        api_key=api_key,
+        api_url=api_url,
         debug=debug,
         prompt_guard=prompt_guard,
         prompt_guard_action=prompt_guard_action,

@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """LiteLLM multi-provider demo.
 
-Demonstrates waxell-observe's LiteLLM instrumentor by calling multiple
+Demonstrates waxell-observe's modern decorator patterns by calling multiple
 models through LiteLLM's unified API: OpenAI, Anthropic, and Groq.
+
+Uses:
+  - @waxell.observe for parent orchestrator and child provider-caller agents
+  - @waxell.tool(tool_type="llm") for the call_llm function
+  - @waxell.step_dec for preprocess_query
+  - @waxell.decision for choose_comparison_strategy
+  - @waxell.reasoning_dec for compare_provider_results
+  - waxell.tag(), waxell.score(), waxell.metadata() for enrichment
 
 Usage::
 
@@ -25,7 +33,10 @@ from _common import setup_observe
 setup_observe()
 
 import waxell_observe
-from waxell_observe import WaxellContext, generate_session_id
+from waxell_observe import (
+    observe,
+    generate_session_id,
+)
 from waxell_observe.errors import PolicyViolationError
 
 from _common import (
@@ -47,6 +58,7 @@ MODELS = [
 ]
 
 
+@waxell_observe.tool(tool_type="llm")
 async def call_llm(model: str, messages: list, dry_run: bool):
     """Call LiteLLM or return a mock response."""
     if dry_run:
@@ -55,6 +67,75 @@ async def call_llm(model: str, messages: list, dry_run: bool):
 
     import litellm
     return await litellm.acompletion(model=model, messages=messages)
+
+
+@waxell_observe.step_dec(name="preprocess_query")
+async def preprocess_query(query: str) -> dict:
+    """Clean and prepare the query for multi-provider comparison."""
+    cleaned = query.strip()
+    word_count = len(cleaned.split())
+    return {
+        "original": query,
+        "cleaned": cleaned,
+        "word_count": word_count,
+        "complexity": "high" if word_count > 10 else "standard",
+    }
+
+
+@waxell_observe.decision(
+    name="choose_comparison_strategy",
+    options=["all_models", "subset"],
+)
+async def choose_comparison_strategy(query: str, models: list[dict]) -> dict:
+    """Decide whether to run all models or a subset based on query complexity."""
+    word_count = len(query.split())
+    # For short queries, use all models; for long/complex queries, also use all
+    # (in production you might select a subset for cost control)
+    chosen = "all_models" if len(models) <= 5 else "subset"
+    return {
+        "chosen": chosen,
+        "reasoning": (
+            f"Query has {word_count} words with {len(models)} available models. "
+            f"Using {'all models' if chosen == 'all_models' else 'top-tier subset'} "
+            f"for comprehensive comparison."
+        ),
+        "confidence": 0.95 if chosen == "all_models" else 0.80,
+    }
+
+
+@waxell_observe.reasoning_dec(step="compare_provider_results")
+async def compare_provider_results(results: list[dict]) -> dict:
+    """Compare token usage and quality across providers."""
+    if not results:
+        return {
+            "thought": "No results to compare",
+            "evidence": [],
+            "conclusion": "No comparison possible",
+        }
+
+    total_tokens = sum(r["tokens"] for r in results)
+    avg_tokens = total_tokens // len(results)
+    most_efficient = min(results, key=lambda r: r["tokens"])
+    most_verbose = max(results, key=lambda r: len(r["content"]))
+
+    evidence = [
+        f"{r['provider']} ({r['tier']}): {r['tokens']} tokens, {len(r['content'])} chars"
+        for r in results
+    ]
+
+    return {
+        "thought": (
+            f"Compared {len(results)} providers. Average token usage: {avg_tokens}. "
+            f"Most efficient: {most_efficient['provider']} ({most_efficient['tokens']} tokens). "
+            f"Most verbose response: {most_verbose['provider']} ({len(most_verbose['content'])} chars)."
+        ),
+        "evidence": evidence,
+        "conclusion": (
+            f"{most_efficient['provider']} is most token-efficient while "
+            f"{most_verbose['provider']} provides the longest response. "
+            f"Total tokens across all providers: {total_tokens}."
+        ),
+    }
 
 
 async def main() -> None:
@@ -68,6 +149,8 @@ async def main() -> None:
     user_id = args.user_id or demo_user["user_id"]
     user_group = args.user_group or demo_user["user_group"]
 
+    observe_client = get_observe_client()
+
     print("[LiteLLM Demo] Starting multi-provider comparison...")
     print(f"[LiteLLM Demo] Session: {session}")
     print(f"[LiteLLM Demo] End user: {user_id} ({user_group})")
@@ -75,31 +158,70 @@ async def main() -> None:
     print(f"[LiteLLM Demo] Models: {', '.join(m['model'] for m in MODELS)}")
     print()
 
-    async with WaxellContext(
-        agent_name="litellm-demo",
+    # ---------------------------------------------------------------
+    # Parent orchestrator
+    # ---------------------------------------------------------------
+    @observe(
+        agent_name="litellm-orchestrator",
         workflow_name="multi-provider",
-        inputs={"query": query, "models": [m["model"] for m in MODELS]},
-        enforce_policy=observe_active,
         session_id=session,
         user_id=user_id,
         user_group=user_group,
+        client=observe_client,
+        enforce_policy=observe_active,
         mid_execution_governance=observe_active,
-        client=get_observe_client(),
-    ) as ctx:
-        ctx.set_tag("demo", "litellm")
-        ctx.set_tag("providers", "openai,anthropic,groq")
-        ctx.set_metadata("num_models", len(MODELS))
+    )
+    async def litellm_orchestrator(query: str) -> dict:
+        """Orchestrate multi-provider LLM comparison."""
 
-        try:
-            results = []
+        waxell_observe.tag("demo", "litellm")
+        waxell_observe.tag("providers", "openai,anthropic,groq")
+        waxell_observe.metadata("num_models", len(MODELS))
 
-            for i, model_config in enumerate(MODELS, 1):
-                model = model_config["model"]
-                provider = model_config["provider"]
-                tier = model_config["tier"]
+        # Step: preprocess the query
+        print("[LiteLLM Demo] Preprocessing query...")
+        preprocessed = await preprocess_query(query)
+        print(f"  Preprocessed: {preprocessed['word_count']} words, complexity={preprocessed['complexity']}")
+        print()
 
-                print(f"[LiteLLM Demo] Step {i}/{len(MODELS)}: Calling {provider} ({tier})...")
-                print(f"  Model: {model}")
+        # Decision: choose comparison strategy
+        print("[LiteLLM Demo] Choosing comparison strategy...")
+        strategy = await choose_comparison_strategy(query, MODELS)
+        chosen_strategy = strategy["chosen"] if isinstance(strategy, dict) else strategy
+        print(f"  Strategy: {chosen_strategy}")
+        print()
+
+        # Determine which models to run
+        models_to_run = MODELS if chosen_strategy == "all_models" else MODELS[:2]
+
+        results = []
+
+        for i, model_config in enumerate(models_to_run, 1):
+            model = model_config["model"]
+            provider = model_config["provider"]
+            tier = model_config["tier"]
+
+            # Child agent per provider
+            @observe(
+                agent_name="litellm-provider-caller",
+                workflow_name=f"call-{provider.lower()}",
+                session_id=session,
+                user_id=user_id,
+                user_group=user_group,
+                client=observe_client,
+                enforce_policy=False,
+            )
+            async def call_provider(
+                query: str,
+                model: str = model,
+                provider: str = provider,
+                tier: str = tier,
+            ) -> dict:
+                """Call a single LLM provider and return results."""
+
+                waxell_observe.tag("provider", provider.lower())
+                waxell_observe.tag("tier", tier)
+                waxell_observe.metadata("model", model)
 
                 messages = [
                     {
@@ -115,63 +237,65 @@ async def main() -> None:
                 tokens_in = response.usage.prompt_tokens
                 tokens_out = response.usage.completion_tokens
 
-                ctx.record_step(f"call_{provider.lower()}", output={
-                    "model": model,
-                    "provider": provider,
-                    "tier": tier,
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                    "content_length": len(content),
-                })
-                ctx.record_llm_call(
-                    model=response.model,
-                    tokens_in=tokens_in,
-                    tokens_out=tokens_out,
-                    task=f"call_{provider.lower()}",
-                    prompt_preview=query[:200],
-                    response_preview=content[:200],
-                )
+                waxell_observe.score("tokens_in", float(tokens_in))
+                waxell_observe.score("tokens_out", float(tokens_out))
+                waxell_observe.metadata("content_length", len(content))
 
-                results.append({
+                return {
                     "provider": provider,
                     "model": model,
                     "tier": tier,
                     "content": content,
                     "tokens": tokens_in + tokens_out,
-                })
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                }
 
-                print(f"  Response: {content[:100]}...")
-                print(f"  Tokens: {tokens_in} in + {tokens_out} out = {tokens_in + tokens_out}")
-                print()
+            print(f"[LiteLLM Demo] Step {i}/{len(models_to_run)}: Calling {provider} ({tier})...")
+            print(f"  Model: {model}")
 
-            # Comparison step
-            print(f"[LiteLLM Demo] Step {len(MODELS) + 1}/{len(MODELS) + 1}: Comparing results...")
+            result = await call_provider(query)
+            results.append(result)
 
-            comparison = {
+            print(f"  Response: {result['content'][:100]}...")
+            print(f"  Tokens: {result['tokens_in']} in + {result['tokens_out']} out = {result['tokens']}")
+            print()
+
+        # Reasoning: compare results across providers
+        print(f"[LiteLLM Demo] Step {len(models_to_run) + 1}/{len(models_to_run) + 1}: Comparing results...")
+        comparison = await compare_provider_results(results)
+
+        for r in results:
+            print(f"  {r['provider']:10s} ({r['tier']:12s}): {r['tokens']:4d} tokens, {len(r['content']):4d} chars")
+
+        # Record final scores and metadata
+        total_tokens = sum(r["tokens"] for r in results)
+        waxell_observe.score("total_tokens", float(total_tokens))
+        waxell_observe.score("models_compared", float(len(results)))
+        waxell_observe.metadata("comparison_conclusion",
+                                comparison["conclusion"] if isinstance(comparison, dict) else str(comparison))
+
+        print()
+        print(f"[LiteLLM Demo] Complete. ({len(results)} LLM calls via LiteLLM)")
+
+        return {
+            "comparison": {
                 r["provider"]: {
                     "model": r["model"],
                     "tokens": r["tokens"],
                     "content_length": len(r["content"]),
                 }
                 for r in results
-            }
+            },
+            "models_tested": len(results),
+            "total_tokens": total_tokens,
+        }
 
-            ctx.record_step("compare_providers", output=comparison)
-
-            for r in results:
-                print(f"  {r['provider']:10s} ({r['tier']:12s}): {r['tokens']:4d} tokens, {len(r['content']):4d} chars")
-
-            ctx.set_result({
-                "comparison": comparison,
-                "models_tested": len(MODELS),
-            })
-
-            print()
-            print(f"[LiteLLM Demo] Complete. ({len(MODELS)} LLM calls via LiteLLM, {len(MODELS) + 1} steps)")
-
-        except PolicyViolationError as e:
-            print(f"\n[LiteLLM Demo] POLICY VIOLATION: {e}")
-            print("[LiteLLM Demo] Agent halted by governance policy.")
+    try:
+        await litellm_orchestrator(query)
+    except PolicyViolationError as e:
+        print(f"\n[LiteLLM Demo] POLICY VIOLATION: {e}")
+        print("[LiteLLM Demo] Agent halted by governance policy.")
 
     waxell_observe.shutdown()
 
