@@ -640,6 +640,15 @@ class _MockContentBlock:
 
 
 @dataclass
+class _MockAnthropicToolUseBlock:
+    """Mimics an Anthropic tool_use content block."""
+    type: str = "tool_use"
+    id: str = "toolu_mock_001"
+    name: str = "verify_answer"
+    input: dict = field(default_factory=dict)
+
+
+@dataclass
 class _MockAnthropicUsage:
     input_tokens: int = 150
     output_tokens: int = 80
@@ -669,11 +678,46 @@ class MockAnthropicMessage:
 
 
 class _MockAnthropicMessages:
-    """Mock for client.messages."""
+    """Mock for client.messages.
+
+    When ``tools`` is present in kwargs and no tool_result messages have
+    been sent yet, returns a tool_use response.  On the follow-up call
+    (with tool results), returns a normal text response.
+    """
 
     async def create(self, **kwargs: Any) -> MockAnthropicMessage:
         messages = kwargs.get("messages", [])
         model = kwargs.get("model", "claude-sonnet-4-5-20250929")
+        tools_param = kwargs.get("tools")
+
+        if tools_param:
+            # Check if we already have a tool result in the messages
+            has_tool_result = any(
+                m.get("role") == "tool" for m in messages if isinstance(m, dict)
+            )
+            if not has_tool_result:
+                # First call with tools — return a tool_use response
+                tool_name = "verify_answer"
+                if tools_param and isinstance(tools_param[0], dict):
+                    tool_name = tools_param[0].get("name", "verify_answer")
+
+                block = _MockAnthropicToolUseBlock(
+                    id=f"toolu_mock_{random.randint(100, 999)}",
+                    name=tool_name,
+                    input={"query": "verification check", "confidence": 0.95},
+                )
+
+                msg = MockAnthropicMessage.__new__(MockAnthropicMessage)
+                msg.id = "msg-mock-tool-use"
+                msg.type = "message"
+                msg.role = "assistant"
+                msg.model = model
+                msg.content = [block]
+                msg.usage = _MockAnthropicUsage(input_tokens=200, output_tokens=50)
+                msg.stop_reason = "tool_use"
+                msg.stop_sequence = None
+                return msg
+
         content = _contextual_response(messages)
         return MockAnthropicMessage(content=content, model=model)
 
